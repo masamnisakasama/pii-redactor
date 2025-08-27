@@ -1,12 +1,14 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse, JSONResponse
 from typing import Optional, List, Dict
 from PIL import Image
 import io, httpx, hashlib
 import fitz  # PyMuPDF使うのに必要
-
 from .settings import Settings
 from . import tf_infer, detectors, alias, render_img, render_pdf
+from fastapi.responses import Response
+from .face_redactor import redact_faces_image_bytes
+
 
 app = FastAPI(title="Secure PII Redactor")
 settings = Settings()
@@ -144,3 +146,18 @@ async def replace(
     img.save(buf, format="PNG")
     buf.seek(0)
     return StreamingResponse(buf, media_type="image/png")
+
+@app.post("/redact/face_image")
+async def redact_face_image(
+    file: UploadFile = File(...),
+    method: str = Query("pixelate", pattern="^(pixelate|blur|box)$"),
+    strength: int = Query(16, ge=1, le=200),
+    expand: float = Query(0.12, ge=0.0, le=0.5),
+    out_format: str = Query("PNG", pattern="^(PNG|png|JPG|JPEG|jpg|jpeg)$"),
+):
+    data = await file.read()
+    out_bytes = redact_faces_image_bytes(
+        data, method=method, strength=strength, expand=expand, out_format=out_format
+    )
+    mt = "image/jpeg" if out_format.lower() in ("jpg","jpeg") else "image/png"
+    return Response(content=out_bytes, media_type=mt)
