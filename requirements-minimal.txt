@@ -1,0 +1,6 @@
+# 最小限の依存関係（起動テスト用）
+fastapi==0.114.0
+uvicorn[standard]==0.30.5
+pydantic-settings==2.4.0
+pillow==10.4.0
+python-multipart==0.0.6
