@@ -9,5 +9,5 @@ diaogbotで出てきた反省点を元にPDCAを回そうと思い作りまし�
 完全オフライン（OpenCV + Tesseract）<br>
 オンプレミスAI + 限定的外部API<br>
 バランス型（一部API使用）<br>
-AI機能最優先（Nanobanan API）<br>
+AI機能最優先（Nanobanana API）<br>
 
