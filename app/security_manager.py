@@ -1,5 +1,5 @@
 # app/security_manager.py
-# 完全オフラインOpenCV + Tesseract、精度低）かオンライン（Nanobanan APIを使う、精度高）か選べるように
+# 完全オフラインOpenCV + Tesseract、精度低）かオンライン（Nanobanana APIを使う、精度高）か選べるように
 
 from enum import Enum
 from typing import Dict, List, Optional, Any, Callable
@@ -7,13 +7,18 @@ import logging
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
 import asyncio
+import pytesseract
+from PIL import Image
+import numpy as np
+import cv2
 
+# 機能としては将来の拡張性重視で残すが、真ん中の２つはとりまMAXIMUMかENHANCEDに変換する方針で
 class SecurityLevel(Enum):
     """セキュリティレベルの定義"""
     MAXIMUM = "maximum"      # 完全オフライン（OpenCV + Tesseract）
     HIGH = "high"           # オンプレミスAI + 限定的外部API
     STANDARD = "standard"   # バランス型（一部API使用）
-    ENHANCED = "enhanced"   # AI機能最優先（Nanobanan API）
+    ENHANCED = "enhanced"   # AI機能最優先（Nanobanana API）
 
 @dataclass
 class SecurityConfig:
@@ -39,23 +44,27 @@ class SecurityConfig:
 
 class ProcessorInterface(ABC):
     """AI処理インターフェース"""
-    
+
     @abstractmethod
     async def ocr_process(self, image, **kwargs) -> List[Dict]:
+        """OCR step. Implement in subclass."""
         pass
-    
+
     @abstractmethod
     async def ner_process(self, texts: List[str], **kwargs) -> List[Dict]:
+        """NER step. Implement in subclass."""
         pass
-    
+
     @abstractmethod
     async def face_detect(self, image, **kwargs) -> List[Dict]:
+        """Face detection step. Implement in subclass."""
         pass
     
     @property
     @abstractmethod
     def security_level(self) -> SecurityLevel:
         pass
+
 
 class MaximumSecurityProcessor(ProcessorInterface):
     """最高セキュリティ：完全オフライン処理"""
@@ -75,88 +84,107 @@ class MaximumSecurityProcessor(ProcessorInterface):
             self.security_logger.info("Offline models initialized")
         except Exception as e:
             self.security_logger.error(f"Failed to initialize offline models: {e}")
+
     
-    async def ocr_process(self, image, **kwargs) -> List[Dict]:
-        """Tesseractのみを使用したOCR"""
-        import pytesseract
-        from PIL import Image
-        import numpy as np
-        
-        if isinstance(image, np.ndarray):
-            image = Image.fromarray(image)
-        
-        try:
-            # OCR設定（高精度モード）
-            custom_config = r'--oem 3 --psm 6'
-            data = pytesseract.image_to_data(
-                image, 
-                lang='jpn+eng',
-                output_type=pytesseract.Output.DICT,
-                config=custom_config
-            )
+    async def ocr_process(self, image, **kwargs) -> List[Dict]:  
+        SCALE = 2.0  # 2倍スケールでOCR → bboxは最後に原寸へ戻す
+            # 入力統一
+        pil = Image.fromarray(image) if hasattr(image, "shape") else image
+
+        # 前処理
+        g = cv2.cvtColor(np.array(pil.convert("RGB")), cv2.COLOR_RGB2GRAY)
+        g = cv2.resize(g, None, fx=SCALE, fy=SCALE, interpolation=cv2.INTER_CUBIC)
+        g = cv2.adaptiveThreshold(
+            g, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15
+        )
+        pil_pre = Image.fromarray(g)
+
+        # OCR（単一行に強い psm=7）
+        data = pytesseract.image_to_data(
+            pil_pre,
+            lang="jpn+eng",
+            output_type=pytesseract.Output.DICT,
+            config="--oem 3 --psm 7",
+        )
+
+        # 単語→行に集約
+        lines: Dict[tuple, Dict] = {}
+        n = len(data.get("text", []))
+        for i in range(n):
+            t = data["text"][i].strip()
+            try:
+                conf = float(data["conf"][i])
+            except Exception:
+                conf = 0.0
+            if not t or conf < 40:
+                continue
+
+            key = (data.get("block_num", [0]*n)[i], data.get("line_num", [0]*n)[i])
+            x1, y1 = int(data["left"][i]), int(data["top"][i])
+            x2, y2 = x1 + int(data["width"][i]), y1 + int(data["height"][i])
+
+            if key not in lines:
+                lines[key] = {"text": t, "bbox": [x1, y1, x2, y2], "max_conf": conf}
+            else:
+                lines[key]["text"] += " " + t
+                b = lines[key]["bbox"]
+                b[0] = min(b[0], x1); b[1] = min(b[1], y1)
+                b[2] = max(b[2], x2); b[3] = max(b[3], y2)
+                lines[key]["max_conf"] = max(lines[key]["max_conf"], conf)
+
+        # bbox を原寸へ戻して返す
+        results: List[Dict] = []
+        for v in lines.values():
+            b0, b1, b2, b3 = v["bbox"]
+            b = (int(b0/SCALE), int(b1/SCALE), int(b2/SCALE), int(b3/SCALE))
+            results.append({
+                "text": v["text"],
+                "bbox": b,
+                "confidence": v["max_conf"]/100.0,
+                "method": "offline_tesseract_line",
+                "security_level": "maximum",
+            })
+        return results
             
-            results = []
-            for i in range(len(data['text'])):
-                text = data['text'][i].strip()
-                if not text or int(data['conf'][i]) < 60:
-                    continue
-                
-                bbox = (
-                    data['left'][i], data['top'][i],
-                    data['left'][i] + data['width'][i],
-                    data['top'][i] + data['height'][i]
-                )
-                
-                results.append({
-                    'text': text,
-                    'bbox': bbox,
-                    'confidence': float(data['conf'][i]) / 100.0,
-                    'method': 'offline_tesseract',
-                    'security_level': 'maximum'
-                })
-            
-            self.security_logger.info(f"Offline OCR processed {len(results)} elements")
-            return results
-            
-        except Exception as e:
-            self.security_logger.error(f"Offline OCR error: {e}")
-            return []
     
     async def ner_process(self, texts: List[str], **kwargs) -> List[Dict]:
-        """ルールベース + 辞書ベースNER"""
+        """ルールベース簡易NER（住所/郵便/人名の一部）"""
         import re
-        results = []
-        
-        # 日本語人名パターン（改良版）
-        patterns = {
-            'name': [
-                r'[一-龠]{2,4}\s*[一-龠]{1,3}(?:さん|様|氏|先生|君|ちゃん)?',
-                r'[ぁ-ゔ]{3,8}(?:さん|様|氏|先生|君|ちゃん)?',
-                r'[ァ-ヶ]{3,8}(?:さん|様|氏|先生|君|ちゃん)?'
-            ],
-            'address': [
-                r'[一-龠]{1,10}[都道府県][一-龠]{1,15}[市区町村][一-龠0-9\-\s]{0,30}',
-                r'〒\s*\d{3}-?\d{4}',
-                r'[0-9]{1,5}-[0-9]{1,5}-[0-9]{1,5}\s*[一-龠]{1,10}'
-            ]
-        }
-        
-        for text in texts:
-            for entity_type, pattern_list in patterns.items():
-                for pattern in pattern_list:
-                    matches = re.finditer(pattern, text)
-                    for match in matches:
-                        results.append({
-                            'text': match.group(),
-                            'type': entity_type,
-                            'conf': 0.75,  # ルールベースは固定信頼度
-                            'reason': f'offline_rule_{entity_type}',
-                            'security_level': 'maximum'
-                        })
-        
-        self.security_logger.info(f"Offline NER found {len(results)} entities")
+        results: List[Dict] = []
+
+        SEP = r'[-．.・ー—－]'  # 区切りのゆれを許容
+        re_postal  = re.compile(r'(?:〒\s*)?(?<!\d)\d{3}[ -‐−–—－]?\d{4}(?![-\d])')
+        re_address = re.compile(
+            rf'[一-龠]{{1,10}}[都道府県][一-龠]{{1,15}}[市区町村][一-龠0-9{SEP}\s]{{0,40}}'
+        )
+        # おまけで人名（緩め）
+        name_patterns = [
+            re.compile(r'[一-龠]{2,4}\s*[一-龠]{1,3}(?:さん|様|氏|先生|君|ちゃん)?'),
+            re.compile(r'[ぁ-ゔ]{3,8}(?:さん|様|氏|先生|君|ちゃん)?'),
+            re.compile(r'[ァ-ヶ]{3,8}(?:さん|様|氏|先生|君|ちゃん)?'),
+        ]
+
+        for text in texts or []:
+            for m in re_postal.finditer(text):
+                results.append({
+                    'text': m.group(), 'type': 'address', 'conf': 0.85,
+                    'reason': 'offline_rule_postal', 'security_level': 'maximum'
+                })
+            for m in re_address.finditer(text):
+                results.append({
+                    'text': m.group(), 'type': 'address', 'conf': 0.80,
+                    'reason': 'offline_rule_address', 'security_level': 'maximum'
+                })
+            for rx in name_patterns:
+                for m in rx.finditer(text):
+                    results.append({
+                        'text': m.group(), 'type': 'name', 'conf': 0.75,
+                        'reason': 'offline_rule_name', 'security_level': 'maximum'
+                    })
+
         return results
-    
+        
+
     async def face_detect(self, image, **kwargs) -> List[Dict]:
         """OpenCV Haar Cascadesによる顔検出"""
         import cv2
@@ -388,6 +416,7 @@ class EnhancedAIProcessor(ProcessorInterface):
     def security_level(self) -> SecurityLevel:
         return SecurityLevel.ENHANCED
 
+# トグルで切り替えるくらいの単純な方が使いやすいね
 class SecurityToggleManager:
     """セキュリティレベル切り替え管理"""
     
@@ -415,6 +444,19 @@ class SecurityToggleManager:
     
     def set_security_level(self, level: SecurityLevel) -> bool:
         """セキュリティレベルを変更"""
+
+        # --- 互換マップ（high/standardを2レベルへ集約（将来使うかもしれないがとりま今は２レベルのみで集約））---
+        deprecated_map = {
+            SecurityLevel.HIGH: SecurityLevel.MAXIMUM,
+            SecurityLevel.STANDARD: SecurityLevel.ENHANCED,
+        }
+        if level in deprecated_map:
+            mapped = deprecated_map[level]
+            self.security_logger.warning(
+                f"{level.value} is deprecated; mapping to {mapped.value}"
+            )
+            level = mapped
+        # ------------------------------------------------------
         if level not in self.processors:
             self.security_logger.error(f"Security level {level} not available")
             return False
