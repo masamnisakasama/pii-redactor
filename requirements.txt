@@ -34,3 +34,9 @@ python-jose[cryptography]>=3.3.0  # For JWT tokens if needed
 # モニタリング関連 (オプショナル)
 # prometheus-client>=0.17.0
 # structlog>=23.0.0
+
+# nano-banana関連
+google-genai
+
+
+
