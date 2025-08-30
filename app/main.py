@@ -9,7 +9,7 @@ from typing import Optional, List, Dict, Set, Tuple
 from PIL import Image
 import io, hashlib, asyncio, re
 import fitz  # PyMuPDF
-
+import os
 from .settings import Settings
 from . import detectors, alias, render_img, render_pdf
 from .security_manager import SecurityToggleManager, SecurityLevel
@@ -31,14 +31,15 @@ app = FastAPI(
 settings = Settings()
 
 # CORS
+origins = [o.strip() for o in os.getenv("FRONTEND_ORIGINS","").split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=(settings.cors_origin.split(",") if settings.cors_origin != "*" else ["*"]),
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT"],
+    allow_origins=origins,        # 明示したドメインだけにしてセキュリティー確保
+    allow_credentials=True,       # Cookie等を使うならTrueにするがまだ未定
+    allow_methods=["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
     allow_headers=["*"],
 )
-
 # セキュリティトグル（グローバル）
 security_manager: Optional[SecurityToggleManager] = None
 
@@ -482,11 +483,13 @@ async def replace_with_security_toggle(
 @app.post("/redact/face_image")
 async def redact_face_with_security_toggle(
     file: UploadFile = File(...),
-    method: str = Query("pixelate", pattern="^(pixelate|blur|box|smart_blur)$"),
+    method: str = Query("pixelate", pattern="^(pixelate|pixelate_strict|blur|box|smart_blur|replace_face)$"),
     strength: int = Query(16, ge=1, le=200),
     expand: float = Query(0.12, ge=0.0, le=0.5),
     out_format: str = Query("PNG", pattern="^(PNG|png|JPG|JPEG|jpg|jpeg)$"),
     security_level: Optional[str] = Query(None),
+    persona: Optional[str] = Query(None),
+    persona_form: Optional[str] = Form(None), # 日本語対応のためフォームでもうける形
 ):
     if not security_manager:
         raise HTTPException(status_code=500, detail="Security manager not initialized")
@@ -511,6 +514,9 @@ async def redact_face_with_security_toggle(
         if use_advanced and hasattr(settings, "nanobanan_api_key"):
             nanobanan_config = {"api_key": settings.nanobanan_api_key, "endpoint": settings.nanobanan_endpoint}
 
+        # フォーム優先でマージする感じ（フォームがあればフォーム値、なければクエリ値）
+        persona_val = persona_form if persona_form is not None else persona
+
         out_bytes = await redact_faces_image_bytes_enhanced(
             data,
             method=method,
@@ -520,6 +526,7 @@ async def redact_face_with_security_toggle(
             use_multiple_detectors=use_advanced,
             nanobanan_api_key=(nanobanan_config.get("api_key") if nanobanan_config else None),
             nanobanan_endpoint=(nanobanan_config.get("endpoint") if nanobanan_config else None),
+            persona=persona_val,
         )
 
         mt = "image/jpeg" if out_format.lower() in ("jpg", "jpeg") else "image/png"
