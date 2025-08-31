@@ -1,7 +1,7 @@
 from pydantic_settings import BaseSettings
 from typing import Optional
 from pydantic import model_validator
-
+from typing import Literal
 class Settings(BaseSettings):
     # 基本設定
     cors_origin: str = "*"
@@ -59,6 +59,14 @@ class Settings(BaseSettings):
     # 追加フィールド（.envから読み込み用）
     secret_key: Optional[str] = None
     api_rate_limit: int = 100
+    
+    # HF/NER関連
+    ner_engine: Literal['regex', 'hf', 'hybrid'] = 'hf'
+    ner_model_name: str = 'dslim/bert-base-NER'
+    ner_aggregation: Literal['simple', 'average', 'max'] = 'simple'
+    
+    # DNN 検出の閾値（顔検出で使用）
+    dnn_confidence_threshold: float = 0.5
     
     class Config:
         env_file = ".env"

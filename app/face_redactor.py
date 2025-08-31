@@ -62,29 +62,59 @@ def _detect_faces_haar(bgr: np.ndarray,
     return _merge_overlapping_faces(all_faces)
 
 # ====== 既存: DNN 検出（任意/重い）=========================================
+# ====== 既存: DNN 検出（任意/重い）=========================================
 def _detect_faces_dnn(bgr: np.ndarray,
                       confidence_threshold: float = 0.5) -> List[Tuple[int,int,int,int]]:
-    """OpenCV DNN（より高精度だが重い）"""
+    """OpenCV DNN（より高精度だが重い）
+    モデルの所在は OPENCV_DNN_DIR > (cwd)/models/face > (file)/../models/face の順で解決。
+    無ければ DNN をスキップして [] を返す。
+    """
     try:
-        net = cv2.dnn.readNetFromTensorflow(
-            'opencv_face_detector_uint8.pb',
-            'opencv_face_detector.pbtxt'
-        )
+        # 1) 明示パス（推奨）
+        model_dir = os.getenv("OPENCV_DNN_DIR")
+
+        # 2) カレント配下 models/face
+        if not model_dir:
+            cand = os.path.join(os.getcwd(), "models", "face")
+            if os.path.isdir(cand):
+                model_dir = cand
+
+        # 3) ファイル相対 ../models/face（pii-redactor/models/face）
+        if not model_dir:
+            here = os.path.dirname(__file__)
+            cand = os.path.normpath(os.path.join(here, "..", "models", "face"))
+            if os.path.isdir(cand):
+                model_dir = cand
+
+        if not model_dir:
+            # 見つからない → DNNは使わず終了（他検出器で継続）
+            # print("[DNN] model dir not found; skipping DNN")  # 必要ならデバッグ出力
+            return []
+
+        bin_path = os.path.join(model_dir, "opencv_face_detector_uint8.pb")
+        txt_path = os.path.join(model_dir, "opencv_face_detector.pbtxt")
+        if not (os.path.exists(bin_path) and os.path.exists(txt_path)):
+            # print(f"[DNN] model files missing in {model_dir}; skipping DNN")
+            return []
+
+        net = cv2.dnn.readNetFromTensorflow(bin_path, txt_path)
+
         h, w = bgr.shape[:2]
         blob = cv2.dnn.blobFromImage(bgr, 1.0, (300, 300), [104, 117, 123])
         net.setInput(blob)
         detections = net.forward()
 
-        faces = []
+        faces: List[Tuple[int,int,int,int]] = []
         for i in range(detections.shape[2]):
-            confidence = detections[0, 0, i, 2]
-            if confidence > confidence_threshold:
+            conf = float(detections[0, 0, i, 2])
+            if conf > confidence_threshold:
                 x1 = int(detections[0, 0, i, 3] * w)
                 y1 = int(detections[0, 0, i, 4] * h)
                 x2 = int(detections[0, 0, i, 5] * w)
                 y2 = int(detections[0, 0, i, 6] * h)
                 faces.append((x1, y1, x2 - x1, y2 - y1))
         return faces
+
     except Exception as e:
         print(f"DNN face detection failed: {e}")
         return []

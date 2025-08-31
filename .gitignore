@@ -55,3 +55,6 @@ audit.log
 
 # DO NOT ignore docker files
 #!.dockerignore
+
+# model artifacts
+models/

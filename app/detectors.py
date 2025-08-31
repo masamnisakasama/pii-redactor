@@ -3,6 +3,12 @@ import re
 from typing import List, Dict
 import cv2
 import numpy as np
+from functools import lru_cache
+try:
+    from transformers import pipeline
+    _HF_AVAILABLE = True
+except Exception:
+    _HF_AVAILABLE = False
 
 # 部分だけdetectされないよう行単位での表示を導入
 LINE_PATTERNS = [
@@ -52,3 +58,70 @@ def _post_filter(rects, img_w, img_h, min_px=56, max_ratio=0.7, nms_thresh=0.30)
     return [tuple(filtered[i]) for i in keep]
 
 
+# --- HF NER 本体 -----------------------------------------------------------
+
+@lru_cache(maxsize=4)
+def _get_hf_ner(model_name: str, aggregation: str):
+    """HF の NER パイプライン（CPU）をキャッシュして返す。"""
+    if not _HF_AVAILABLE:
+        return None
+    return pipeline(
+        task="token-classification",
+        model=model_name,
+        aggregation_strategy=aggregation,  # 'simple'|'average'|'max'
+        device=-1,  # CPU 固定（安全）
+    )
+
+# HFラベル→PII種別の簡易マップ（必要に応じて拡張）
+_HF2PII = {
+    "PER": "name",
+    "ORG": "org",
+    "LOC": "address",
+    "MISC": "misc",
+}
+
+def hf_ner(text: str, model_name: str, aggregation: str) -> List[Dict]:
+    """HF NER を {type,text,conf} に正規化して返す。未導入なら空配列。"""
+    pipe = _get_hf_ner(model_name, aggregation)
+    if pipe is None:
+        return []
+    out: List[Dict] = []
+    try:
+        for ent in pipe(text):
+            label = (ent.get("entity_group") or ent.get("entity") or "").upper()
+            pii_type = _HF2PII.get(label, "misc")
+            word = ent.get("word") or ent.get("text") or ""
+            out.append({"type": pii_type, "text": word, "conf": float(ent.get("score", 0.0))})
+    except Exception as e:
+        print(f"HF NER failed: {e}")
+    return out
+
+def detect_text_pii(
+    text: str,
+    ner_engine: str = "regex",
+    model_name: str = "dslim/bert-base-NER",
+    aggregation: str = "simple",
+) -> List[Dict]:
+    """
+    テキストPII検出の統合入口。regex / hf / hybrid を切替。
+    既存の classify_by_regex(...) はそのまま活かす。
+    """
+    regex_hits = classify_by_regex(text)
+    if ner_engine == "regex":
+        return regex_hits
+    ner_hits = hf_ner(text, model_name, aggregation) if ner_engine in ("hf", "hybrid") else []
+    if ner_engine == "hf":
+        return ner_hits
+    # hybrid
+    return regex_hits + ner_hits
+
+# detectors.py 末尾に（再掲）
+def detect_text_regions_east(image_bgr):
+    if os.getenv("USE_TEXT_EAST", "false").lower() != "true":
+        return []
+    try:
+        from .text_detect import detect_text_boxes_east
+        return detect_text_boxes_east(image_bgr)
+    except Exception as e:
+        print(f"EAST disabled: {e}")
+        return []
