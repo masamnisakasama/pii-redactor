@@ -1,0 +1,27 @@
+# Pythonキャッシュ/仮想環境など
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv*/
+env/
+venv/
+
+# 環境ファイル・鍵
+.env*
+*.pem
+*.key
+
+# ログ/キャッシュ
+*.log
+.cache/
+
+# 大物や不要アセット（必要なら外してOK）
+models/
+test_images/
+sample_data/
+uploads/
+out.*
+*.bin
+*.pkl
+*.model

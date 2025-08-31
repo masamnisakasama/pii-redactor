@@ -1,0 +1,42 @@
+# requirements.txt
+# FastAPI関連の依存
+fastapi==0.114.0
+uvicorn[standard]==0.30.5
+pydantic-settings==2.4.0
+httpx==0.27.0
+
+# イメージ処理
+pillow==10.4.0
+opencv-python-headless>=4.9.0
+numpy>=1.26
+
+# OCRとPDF処理関連
+pytesseract==0.3.10
+pymupdf==1.24.9
+img2pdf==0.5.1
+
+# エイリアス生成用
+faker==27.0.0
+
+# AI/ML 関連 (正直オプショナル nanobanana integration統合するなら不要か)
+# tensorflow>=2.13.0  # Uncomment if using TensorFlow Serving
+# torch>=2.0.0        # Uncomment if using PyTorch models
+# transformers>=4.30.0 # Uncomment if using Hugging Face models
+
+# デバッグとか開発系
+python-multipart==0.0.6  # For form data handling
+aiofiles>=23.0.0         # For async file operations
+
+# セキュリティー強化
+cryptography>=41.0.0     # For enhanced encryption
+python-jose[cryptography]>=3.3.0  # For JWT tokens if needed
+
+# モニタリング関連 (オプショナル)
+# prometheus-client>=0.17.0
+# structlog>=23.0.0
+
+# nano-banana関連
+google-genai
+
+
+

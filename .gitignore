@@ -1,0 +1,57 @@
+# Python build / cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.Python
+build/
+dist/
+.eggs/
+wheels/
+.installed.cfg
+
+# venv
+.venv*/
+venv/
+env/
+ENV/
+
+# logs
+*.log
+.cache/
+logs/
+
+# outputs
+out.*
+output/
+temp/
+tmp/
+
+# datasets / uploads
+uploads/
+sample_data/
+test_images/
+
+# secrets
+.env
+*.env
+.env.local
+.env.production
+*.key
+*.pem
+*.p12
+*.pfx
+
+# IDE
+.DS_Store
+.vscode/
+.idea/
+
+# security/audit (if generated)
+security.log
+audit.log
+
+# DO NOT ignore docker files
+#!.dockerignore
