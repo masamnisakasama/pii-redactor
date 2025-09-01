@@ -3,6 +3,7 @@ import re
 from typing import List, Dict
 import cv2
 import numpy as np
+import os
 from functools import lru_cache
 try:
     from transformers import pipeline
@@ -115,7 +116,8 @@ def detect_text_pii(
     # hybrid
     return regex_hits + ner_hits
 
-# detectors.py 末尾に（再掲）
+# EAST検出のラッパ関数（環境変数を有効化(True)しとけばTrueになるガード付き）
+
 def detect_text_regions_east(image_bgr):
     if os.getenv("USE_TEXT_EAST", "false").lower() != "true":
         return []

@@ -1,3 +1,5 @@
+# app/setttings.py
+
 from pydantic_settings import BaseSettings
 from typing import Optional
 from pydantic import model_validator
@@ -67,6 +69,14 @@ class Settings(BaseSettings):
     
     # DNN 検出の閾値（顔検出で使用）
     dnn_confidence_threshold: float = 0.5
+
+    # EAST（画像内テキスト検出で使用） 
+    use_east_text: bool = False                         # 環境変数: USE_EAST_TEXT=true でEASTを有効化
+    east_pb: Optional[str] = None                       # 環境変数: EAST_PB=/abs/path/to/frozen_east_text_detection.pb
+    east_conf_threshold: float = 0.5                    # EASTのスコア閾値
+    east_nms_threshold: float = 0.4                     # NMSの閾値
+    east_max_side: int = 1280                           # 入力サイズ上限（32の倍数に丸める）
+    east_min_size: int = 6  
     
     class Config:
         env_file = ".env"

@@ -10,13 +10,13 @@ from PIL import Image
 import io, hashlib, asyncio, re
 import fitz  # PyMuPDF
 import os
-from .settings import Settings
+import logging
+
 from . import detectors, alias, render_img, render_pdf
 from .security_manager import SecurityToggleManager, SecurityLevel
 from .face_redactor import redact_faces_image_bytes_enhanced
-
-import logging
-
+from .settings import Settings  
+from .text_detect import detect_text_boxes_east # 文字検知の後、redactもmain.pyで
 # ---------------------------------------------------
 # アプリ/設定
 # ---------------------------------------------------
@@ -465,6 +465,26 @@ async def replace_with_security_toggle(
                             small = Image.fromarray(region).resize((16, 16), Image.Resampling.NEAREST)
                             arr[y1:y2, x1:x2] = np.array(small.resize((x2 - x1, y2 - y1), Image.Resampling.NEAREST))
                 img = Image.fromarray(arr)
+
+        # === EAST text redaction (optional; OFF by default) =================
+        if settings.use_east_text:
+            try:
+                import numpy as np, cv2, os
+                bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+                boxes = detect_text_boxes_east(
+                    bgr,
+                    model_path=(settings.east_pb or os.getenv("EAST_PB") or "models/text/frozen_east_text_detection.pb"),
+                    conf_thr=settings.east_conf_threshold,
+                    nms_thr=settings.east_nms_threshold,
+                    max_side=settings.east_max_side,
+                    min_size=settings.east_min_size,
+                )
+                # ここでは安全側に倒して、検出テキスト領域を角丸ボックスで塗る
+                for (x, y, w, h) in boxes:
+                    render_img.draw_replace(img, (x, y, x + w, y + h), "█", mode="box", font_path=None)
+                logger.info(f"[east] masked text boxes: {len(boxes)}")
+            except Exception as e:
+                logger.warning(f"EAST text redaction skipped: {e}")
 
         buf = io.BytesIO()
         img.save(buf, format="PNG")

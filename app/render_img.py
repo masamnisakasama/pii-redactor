@@ -1,7 +1,15 @@
 # app/render_img.py
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
-from typing import Tuple
+from typing import Tuple, List
 from typing import Optional # 型ヒント導入で使いやすく
+import os
+import cv2
+import pytesseract
+from .text_detect import detect_text_boxes_east
+from .detectors import detect_text_pii
+from .face_redactor import _box_roi_rounded  # 角丸ボックスを再利用
+
+
 def _auto_pad(bbox, base: int = 8) -> int:
     x1, y1, x2, y2 = map(int, bbox)
     h = max(1, y2 - y1)
@@ -114,3 +122,62 @@ def subbbox_from_match(line_text: str, match_text: str, line_bbox, font_path=Non
     sy1 = max(0, y1 - pad)
     sy2 = y2 + pad
     return (sx1 - pad, sy1, sx2 + pad, sy2)
+
+def redact_text_with_east(
+    bgr, *,
+    east_pb: str | None = None,
+    conf: float = None,
+    nms: float = None,
+    max_side: int = None,
+    min_size: int = None,
+    ocr_lang: str | None = None,
+    ner_engine: str | None = None,
+    hf_model: str | None = None,
+) -> Tuple[any, List[Tuple[int,int,int,int]]]:
+    """
+    EAST→OCR→PII→塗り の最小実装。bgrを直接編集して返す。
+    戻り値: (bgr, マスクしたbox一覧)
+    """
+    # 環境変数で上書きできるように（なければデフォルト）
+    east_pb   = east_pb   or os.getenv("EAST_PB", "models/text/frozen_east_text_detection.pb")
+    conf      = conf      if conf      is not None else float(os.getenv("EAST_CONF", "0.50"))
+    nms       = nms       if nms       is not None else float(os.getenv("EAST_NMS",  "0.40"))
+    max_side  = max_side  if max_side  is not None else int(os.getenv("EAST_MAX_SIDE", "1280"))
+    min_size  = min_size  if min_size  is not None else int(os.getenv("EAST_MIN_SIZE", "8"))
+    ocr_lang  = ocr_lang  or os.getenv("OCR_LANG", "eng+jpn")
+    ner_engine= ner_engine or os.getenv("TEXT_NER", "regex")  # 'regex'|'hf'|'hybrid'
+    hf_model  = hf_model  or os.getenv("HF_NER_MODEL", "dslim/bert-base-NER")
+
+    boxes = detect_text_boxes_east(
+        bgr,
+        model_path=east_pb,
+        conf_thr=conf,
+        nms_thr=nms,
+        max_side=max_side,
+        min_size=min_size,
+    )
+    if not boxes:
+        return bgr, []
+
+    masked: List[Tuple[int,int,int,int]] = []
+    for (x,y,w,h) in boxes:
+        roi = bgr[y:y+h, x:x+w]
+
+        # 軽めの二値化でOCRを安定（必要に応じて調整）
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        thr  = cv2.threshold(gray, 0, 255, cv2.THRESH_OTSU | cv2.THRESH_BINARY)[1]
+        text = pytesseract.image_to_string(thr, lang=ocr_lang, config="--psm 6")
+        text = (text or "").strip()
+        if not text:
+            continue
+
+        # 既存のPII判定をそのまま使う
+        hits = detect_text_pii(text, ner_engine=ner_engine, model_name=hf_model, aggregation="simple")
+        if not hits:
+            continue
+
+        # 丸角黒塗り（既存と同じ見た目）
+        _box_roi_rounded(bgr, x, y, w, h, corner_radius=max(6, min(w,h)//10))
+        masked.append((x,y,w,h))
+
+    return bgr, masked

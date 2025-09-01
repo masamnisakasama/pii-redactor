@@ -1,5 +1,13 @@
 # app/text_detect.py
 # EAST text detector (CPU / offline). Returns list[(x,y,w,h)] in original image coords.
+
+# 主な中身：
+# _get_east_net(model_path) : EAST(テキスト認識ライブラリ)pb を読み込む 出力をDNNに繋いでいる
+# _east_input_size(w,h,max_side) : 32の倍数に丸める前処理
+# _decode_east(scores, geometry, conf_thr) : OpenCV サンプル
+# detect_text_boxes_east　読み込んだテキストをボックス化　→ 元画像座標系の (x,y,w,h) リストを返す
+# draw_boxes_debug(bgr, boxes) … デバッグ用矩形描画（実際には未だ未使用だが今後使うかも）
+
 from __future__ import annotations
 import os, math
 from typing import List, Tuple
