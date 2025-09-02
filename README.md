@@ -39,17 +39,17 @@ NER：外部API（BERT系等の高精度推論）、閾値高めで誤検出抑�
 
 ## API
 GET /health <br>
-稼働状況・現在のセキュリティレベルなどを返します。<br>
+稼働状況・現在のセキュリティレベルなどを返します。<br><br>
 GET /capabilities<br>
-サポート形式、最大サイズ、利用可能セキュリティレベルを返します。<br>
+サポート形式、最大サイズ、利用可能セキュリティレベルを返します。<br><br>
 GET /security/status<br>
 POST /security/level<br>
-一時的にセキュリティレベルを変更できます。<br>
+一時的にセキュリティレベルを変更できます。<br><br>
 curl -s -X POST -F "level=maximum" http://127.0.0.1:8000/security/level | jq<br>
 POST /redact/preview<br>
 対象領域（bbox）とタイプを描画せず返します。<br>
 policy：email,name,phone,id,amount,address,face からカンマ区切り<br>
-font_path：style=readable系で描画合わせに使うフォント（トーンが崩れる場合に指定）<br>
+font_path：style=readable系で描画合わせに使うフォント（トーンが崩れる場合に指定）<br><br>
 POST /redact/replace<br>
 実際に描画して置換（画像はPNG、PDFは再合成PDFで返却）<br>
 style：readable | box | pixelate | blur<br>
@@ -57,11 +57,11 @@ replace_scope：token | line<br>
 token：一致トークン単位で描画<br>
 line：行全体を置換テキストで1回だけ描画（ゴースト抑制あり）<br>
 face_mode：blur | pixelate | pixelate_strict | smart_blur | replace_face | keep<br>
-consent_faces が granted でない場合は replace_face を smart_blur に強制ダウングレード<br>
+consent_faces が granted でない場合は replace_face を smart_blur に強制ダウングレード<br><br>
 POST /redact/face_image<br>
 顔だけを指定モードで処理（画像入力限定）<br>
 curl -s -X POST http://127.0.0.1:8000/redact/face_image \<br>
-  -F "file=@faces.jpeg" -F "method=pixelate" -o out_face.png -D -<br>
+  -F "file=@faces.jpeg" -F "method=pixelate" -o out_face.png -D -<br><br>
 POST /detect/summary<br>
 置換はせず、ファイル内の PII 検出数を返却。<br>
 （CIの公開前スキャン等で使う想定）<br>
