@@ -5,18 +5,23 @@
 from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from typing import Optional, List, Dict, Set, Tuple
 from PIL import Image
 import io, hashlib, asyncio, re
 import fitz  # PyMuPDF
 import os
 import logging
+import asyncio
 
 from . import detectors, alias, render_img, render_pdf
 from .security_manager import SecurityToggleManager, SecurityLevel
 from .face_redactor import redact_faces_image_bytes_enhanced
 from .settings import Settings  
 from .text_detect import detect_text_boxes_east # 文字検知の後、redactもmain.pyで
+# PII検知から処理のパイプラインを構成
+from .pipeline_modes import resolve_face_mode, enforce_face_consent
+
 # ---------------------------------------------------
 # アプリ/設定
 # ---------------------------------------------------
@@ -335,6 +340,8 @@ async def replace_with_security_toggle(
     image_url: Optional[str] = Form(None),
     font_path: Optional[str] = Form(None),
     replace_scope: str = Form("token"),  # "token" or "line"
+    face_mode: str | None = Form(None),
+    consent_faces: str = Form("unknown"),  # 'granted'|'unknown'|'denied'
 ):
     """
     置換（描画あり）
@@ -407,6 +414,8 @@ async def replace_with_security_toggle(
                             )
                             hits_by_page.setdefault(page_idx, []).append({"bbox": sub_bbox, "new": alias_txt})
 
+            # TODO: （必要なら）PDFでも顔処理をしたい場合、ここで pimg ごとに顔検出→bbox を hits に足す設計にする
+
             pdf_bytes = render_pdf.process_pdf_raster(blob, hits_by_page, style=style)
             return StreamingResponse(
                 io.BytesIO(pdf_bytes),
@@ -425,6 +434,7 @@ async def replace_with_security_toggle(
         seen_line_boxes_img: List[Tuple[int, int, int, int]] = []
         IOU_TH_IMG = 0.6
 
+        # --- 文字：token/line 置換の描画 ---
         for ocr_result in ai_results.get("ocr_results", []):
             line_text = ocr_result.get("text", "")
             line_bbox = ocr_result.get("bbox")
@@ -451,20 +461,46 @@ async def replace_with_security_toggle(
                     )
                     render_img.draw_replace(img, sub_bbox, alias_txt, mode=style, font_path=font_path)
 
-        # 顔（必要なら）
+        # --- 顔：PII_IMAGES_MODE/face_mode/consent を反映して処理 ---
+        _face_method = resolve_face_mode(face_mode)                        # env or form → method名にマップ
+        _face_method = enforce_face_consent(_face_method, consent_faces)   # 同意ないswapはsmart_blurへ
+
         if "face" in policies:
-            face_results = ai_results.get("face_results", [])
-            if face_results:
-                import numpy as np
-                arr = np.array(img)
-                for fr in face_results:
-                    x1, y1, x2, y2 = map(int, fr.get("bbox", (0, 0, 0, 0)))
-                    if x2 > x1 and y2 > y1:
-                        region = arr[y1:y2, x1:x2]
-                        if region.size > 0:
-                            small = Image.fromarray(region).resize((16, 16), Image.Resampling.NEAREST)
-                            arr[y1:y2, x1:x2] = np.array(small.resize((x2 - x1, y2 - y1), Image.Resampling.NEAREST))
-                img = Image.fromarray(arr)
+            # セキュリティレベルに応じて Nanobanana など外部APIをオン
+            use_advanced = security_manager.current_level == SecurityLevel.ENHANCED
+            nb_key = getattr(settings, "nanobanan_api_key", None) if use_advanced else None
+            nb_ep  = getattr(settings, "nanobanan_endpoint", None) if use_advanced else None
+
+            # いまの img を一旦 PNG バイト化 → 顔処理 → PIL に戻す
+            _buf = io.BytesIO()
+            img.save(_buf, format="PNG")
+            _in_bytes = _buf.getvalue()
+
+            out_bytes = await redact_faces_image_bytes_enhanced(
+                _in_bytes,
+                method=_face_method,          # blur / pixelate / pixelate_strict / smart_blur / replace_face / keep
+                strength=16,                  # 必要に応じて ENV 化
+                expand=0.12,
+                out_format="PNG",
+                use_multiple_detectors=use_advanced,   # ENHANCED では多段検出
+                nanobanan_api_key=nb_key,              # ENHANCED かつキーがあれば API 利用
+                nanobanan_endpoint=nb_ep,
+                persona=None,                           # 将来の差し替え人格指定
+            )
+            img = Image.open(io.BytesIO(out_bytes)).convert("RGB")
+
+            # --- 旧：簡易モザイク実装（参考）---
+            # 残しておくが、いまは enhanced API 呼び出しに置換済み。
+            # import numpy as np
+            # arr = np.array(img)
+            # for fr in ai_results.get("face_results", []):
+            #     x1, y1, x2, y2 = map(int, fr.get("bbox", (0, 0, 0, 0)))
+            #     if x2 > x1 and y2 > y1:
+            #         region = arr[y1:y2, x1:x2]
+            #         if region.size > 0:
+            #             small = Image.fromarray(region).resize((16, 16), Image.Resampling.NEAREST)
+            #             arr[y1:y2, x1:x2] = np.array(small.resize((x2 - x1, y2 - y1), Image.Resampling.NEAREST))
+            # img = Image.fromarray(arr)
 
         # === EAST text redaction (optional; OFF by default) =================
         if settings.use_east_text:
@@ -494,7 +530,6 @@ async def replace_with_security_toggle(
     finally:
         if security_level and original_level != security_manager.current_level:
             security_manager.set_security_level(original_level)
-
 
 # ---------------------------------------------------
 # 顔画像の編集
@@ -564,6 +599,81 @@ async def redact_face_with_security_toggle(
 # その他
 # /capabilitiesはセキュリティレベル設定（真ん中二つはとりあえず今はなしで）
 # ---------------------------------------------------
+
+ # アップロードされた画像やPDFを解析し、メール、電話番号、住所、ID、顔などの個人情報の検出数を返却
+@app.post("/detect/summary")
+async def detect_summary(
+    file: UploadFile = File(...),
+    policy: str = Form("email,phone,address,id,face"),
+    consistency_key: str = Form("ci"),
+    security_level: Optional[str] = Form(None),
+    ocr_timeout_s: int = Form(5),
+):
+    if not security_manager:
+        raise HTTPException(status_code=500, detail="Security manager not initialized")
+
+    logger.info("detect: start (%s)", getattr(file, "filename", "unknown"))
+    data = await _load_file_bytes(file, None)
+    policies: Set[str] = set(p.strip() for p in policy.split(",") if p.strip())
+    counts: Dict[str, int] = {"email": 0, "phone": 0, "address": 0, "id": 0, "face": 0}
+
+    # 一時レベル（指定があれば）
+    original_level = security_manager.current_level
+    if security_level:
+        try:
+            security_manager.set_security_level(SecurityLevel(security_level))
+        except Exception:
+            logger.warning("ignore invalid security_level=%s", security_level)
+
+    try:
+        ext = (file.filename or "").lower().split(".")[-1]
+        if ext == "pdf":
+            logger.info("detect: branch=pdf")
+            pdf = fitz.open(stream=data, filetype="pdf")
+            for page in pdf:
+                if "face" in policies:
+                    pix = page.get_pixmap()
+                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    faces = detectors.detect_faces_cv2(img)
+                    counts["face"] += len(faces)
+                if policies.intersection({"email","phone","address","id"}):
+                    text = page.get_text() or ""
+                    for hit in detectors.classify_by_regex(text):
+                        k = hit.get("type")
+                        if k in counts: counts[k] += 1
+            pdf.close()
+        else:
+            logger.info("detect: branch=image")
+            img = Image.open(io.BytesIO(data)).convert("RGB")
+            if "face" in policies:
+                faces = detectors.detect_faces_cv2(img); counts["face"] += len(faces)
+                logger.info("detect: faces=%d", counts["face"])
+
+            if policies.intersection({"email","phone","address","id"}):
+                full_text = ""
+                proc = security_manager.get_current_processor()
+                if proc and hasattr(proc, "ocr_process"):
+                    try:
+                        logger.info("detect: ocr start (timeout=%ss)", ocr_timeout_s)
+                        items = await asyncio.wait_for(proc.ocr_process(img), timeout=ocr_timeout_s)
+                        full_text = "\n".join([it.get("text","") if isinstance(it,dict) else str(it) for it in items])
+                        logger.info("detect: ocr done (len=%d)", len(full_text))
+                    except Exception as e:
+                        logger.warning("OCR timeout/fallback: %s", e)
+                        full_text = ""
+                if full_text:
+                    for hit in detectors.classify_by_regex(full_text):
+                        k = hit.get("type")
+                        if k in counts: counts[k] += 1
+    except Exception as e:
+        logger.exception("PII summary detection failed: %s", e)
+    finally:
+        if security_level and original_level != security_manager.current_level:
+            security_manager.set_security_level(original_level)
+
+    logger.info("detect: finished (counts=%s)", counts)
+    return JSONResponse({"counts": counts, "pii_found": any(counts.values())})
+
 @app.get("/capabilities")
 async def get_capabilities():
     if not security_manager:
