@@ -6,7 +6,7 @@ diaogbotで出てきた反省点を元にPDCAを回そうと思い作りまし�
 色々考えた結果、セキュリティーレベルを切り替えできるシステムにし、より魅力的なサービスを目指します。<br>
 簡素な方がユーザビリティが上がると考え、セキュリティは下の2段階に分けます。
 
-## 1)完全オフライン（OpenCV + Tesseract or DNN）（ダウンロードで完全オフラインんにして使える形式にすることを考えています）<br>
+## 1)完全オフライン（OpenCV + Tesseract or DNN）（ダウンロードで完全オフラインにして使える形式にすることを考えています）<br>
 狙い：ネット遮断でも動く“最強に安全”な処理<br>
 ネットワーク：外部通信なし（API不使用）<br>
 OCR：Tesseract<br>
@@ -17,8 +17,8 @@ NER（個人情報抽出）：正規表現＋ルール（日本語住所・氏�
 ## 代表環境変数例(あくまで予定)：<br>
 - default_security_level=maximum
 - disable_network_access=true
-- use_nanobanan_ocr=false
-- use_nanobanan_ner=false
+- use_nanobanana_ocr=false
+- use_nanobanana_ner=false
 
 
 
@@ -32,8 +32,8 @@ NER：外部API（BERT系等の高精度推論）、閾値高めで誤検出抑�
 弱み：データ外送のリスクとAPIコスト／レイテンシ依存<br>
 ## 代表環境変数例(あくまで予定)：<br>
 - default_security_level=enhanced
-- nanobanan_api_key=
-- nanobanan_endpoint=
-- use_nanobanan_ocr=true
-- use_nanobanan_ner=true
+- nanobanana_api_key=
+- nanobanana_endpoint=
+- use_nanobanana_ocr=true
+- use_nanobanana_ner=true
 
