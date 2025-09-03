@@ -37,7 +37,7 @@ test_images/
 # secrets
 .env
 *.env
-.env.local
+.env.offline
 .env.production
 *.key
 *.pem
@@ -58,3 +58,10 @@ audit.log
 
 # model artifacts
 models/
+
+# local env & artifacts
+.env
+*.env
+out*.png
+__pycache__/
+*.pyc
