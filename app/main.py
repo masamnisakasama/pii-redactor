@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from typing import Optional, List, Dict, Set, Tuple
 from PIL import Image
-import io, hashlib, asyncio, re
+import io, hashlib, asyncio, re, time
 import fitz  # PyMuPDF
 import os
 import logging
@@ -352,6 +352,12 @@ async def replace_with_security_toggle(
         raise HTTPException(status_code=500, detail="Security manager not initialized")
     if not file and not image_url:
         return JSONResponse({"error": "no input"}, status_code=400)
+    
+
+    # --- metrics (可視化用) ---
+    replaced_tokens = 0
+    replaced_lines = 0
+    t0 = time.time()
 
     allowed_styles = {"readable", "box", "pixelate", "blur"}
     if style not in allowed_styles:
@@ -405,6 +411,8 @@ async def replace_with_security_toggle(
 
                         new_line = _inline_replace_line(line_text, policies, consistency_key)
                         hits_by_page.setdefault(page_idx, []).append({"bbox": lb, "new": new_line})
+                        replaced_lines += 1
+
                     else:
                         # token: 部分 bbox を推定して個別に描画
                         for h in regex_hits:
@@ -413,14 +421,21 @@ async def replace_with_security_toggle(
                                 line_text=line_text, match_text=h["text"], line_bbox=line_bbox, font_path=font_path
                             )
                             hits_by_page.setdefault(page_idx, []).append({"bbox": sub_bbox, "new": alias_txt})
+                            replaced_tokens += 1
 
-            # TODO: （必要なら）PDFでも顔処理をしたい場合、ここで pimg ごとに顔検出→bbox を hits に足す設計にする
-
+            # PDFでも顔処理をしたい場合、ここで pimg ごとに顔検出→bbox を hits に足す設計にする
+            # X-Replaced-Tokens,X-Replaced-Linesはそれぞれトークン置換した件数と行置換した件数
             pdf_bytes = render_pdf.process_pdf_raster(blob, hits_by_page, style=style)
+            elapsed_ms = int((time.time() - t0) * 1000)
             return StreamingResponse(
                 io.BytesIO(pdf_bytes),
                 media_type="application/pdf",
-                headers={"X-Security-Level": security_manager.current_level.value},
+                headers={
+                    "X-Security-Level": security_manager.current_level.value,
+                    "X-Replaced-Tokens": str(replaced_tokens),
+                    "X-Replaced-Lines": str(replaced_lines),
+                    "X-Elapsed-ms": str(elapsed_ms),
+                },
             )
 
         # =========================
@@ -453,6 +468,8 @@ async def replace_with_security_toggle(
 
                 new_line = _inline_replace_line(line_text, policies, consistency_key)
                 render_img.draw_replace(img, lb, new_line, mode=style, font_path=font_path)
+                replaced_lines += 1
+
             else:
                 for h in regex_hits:
                     alias_txt = _generate_alias(h["type"], h["text"], consistency_key)
@@ -460,6 +477,7 @@ async def replace_with_security_toggle(
                         line_text=line_text, match_text=h["text"], line_bbox=line_bbox, font_path=font_path
                     )
                     render_img.draw_replace(img, sub_bbox, alias_txt, mode=style, font_path=font_path)
+                    replaced_tokens += 1
 
         # --- 顔：PII_IMAGES_MODE/face_mode/consent を反映して処理 ---
         _face_method = resolve_face_mode(face_mode)                        # env or form → method名にマップ
@@ -525,7 +543,18 @@ async def replace_with_security_toggle(
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         buf.seek(0)
-        return StreamingResponse(buf, media_type="image/png", headers={"X-Security-Level": security_manager.current_level.value})
+        
+        elapsed_ms = int((time.time() - t0) * 1000)
+        return StreamingResponse(
+            buf,
+            media_type="image/png",
+            headers={
+                "X-Security-Level": security_manager.current_level.value,
+                "X-Replaced-Tokens": str(replaced_tokens),
+                "X-Replaced-Lines": str(replaced_lines),
+                "X-Elapsed-ms": str(elapsed_ms),
+            },
+        )
 
     finally:
         if security_level and original_level != security_manager.current_level:
@@ -661,10 +690,31 @@ async def detect_summary(
                     except Exception as e:
                         logger.warning("OCR timeout/fallback: %s", e)
                         full_text = ""
+                
+                # --- OCRフォールバック（空だったら pytesseract を4秒だけ） ---
+                if not full_text:
+                    try:
+                        from starlette.concurrency import run_in_threadpool
+                        import pytesseract, os as _os
+                        lang = _os.getenv("TESSERACT_LANG", "jpn+eng")
+                        logger.info("detect: ocr fallback image_to_string (timeout=4s)")
+                        full_text = await asyncio.wait_for(
+                            run_in_threadpool(pytesseract.image_to_string, img, lang=lang),
+                            timeout=4.0
+                        )
+                        full_text = (full_text or "").strip()
+                        logger.info("detect: ocr fallback done (len=%d)", len(full_text))
+                    except Exception as e:
+                        logger.warning(f"detect: ocr fallback failed: {e}")
+                        full_text = ""
+
                 if full_text:
                     for hit in detectors.classify_by_regex(full_text):
                         k = hit.get("type")
-                        if k in counts: counts[k] += 1
+                        if k in counts:
+                            counts[k] += 1
+
+
     except Exception as e:
         logger.exception("PII summary detection failed: %s", e)
     finally:
@@ -712,3 +762,172 @@ async def health_check():
         "available_processors": len(security_manager.processors),
         "timestamp": int(asyncio.get_event_loop().time()),
     })
+
+
+
+
+
+
+
+
+# ===== FAST ENDPOINTS:ハング対策とエラー治らない時の原因切り分け用として追加） =====
+#  - summary_fast : 顔はOpenCV、テキストはpytesseractをスレッドに飛ばしてタイムアウト付き
+#  - replace_fast : 顔だけ加工（OCRは使わず軽量でピクセル化になってる）
+
+import asyncio
+import io
+from typing import Set, Dict
+from PIL import Image
+
+try:
+    import pytesseract  # pip install pytesseract / brew install tesseract
+except Exception as _e:
+    pytesseract = None
+
+try:
+    import cv2
+    import numpy as np
+except Exception as _e:
+    cv2 = None
+    np = None
+
+from starlette.concurrency import run_in_threadpool
+from fastapi import UploadFile, File, Form
+from fastapi.responses import JSONResponse, StreamingResponse
+
+
+def _pixelate_region(pil_img: Image.Image, box: tuple[int, int, int, int], factor: int = 16) -> None:
+    """画像の一部を粗くリサイズして戻す簡易ピクセレート"""
+    x1, y1, x2, y2 = [int(v) for v in box]
+    x1, y1 = max(x1, 0), max(y1, 0)
+    x2, y2 = min(x2, pil_img.width), min(y2, pil_img.height)
+    if x2 <= x1 or y2 <= y1:
+        return
+    region = pil_img.crop((x1, y1, x2, y2))
+    w, h = region.size
+    # 最低サイズを確保して極端な縮小を避ける
+    small_w = max(1, w // factor)
+    small_h = max(1, h // factor)
+    small = region.resize((small_w, small_h), Image.NEAREST)
+    pix = small.resize((w, h), Image.NEAREST)
+    pil_img.paste(pix, (x1, y1, x2, y2))
+
+
+def _detect_faces_cv2_simple(pil_img: Image.Image) -> list[tuple[int, int, int, int]]:
+    """OpenCV Haar で簡易顔検出（CV2未導入や分類器未取得なら空配列）"""
+    if cv2 is None:
+        return []
+    try:
+        # 既定のHaar分類器パス
+        cascade_path = getattr(cv2.data, "haarcascades", "") + "haarcascade_frontalface_default.xml"
+        face_cascade = cv2.CascadeClassifier(cascade_path)
+        if face_cascade.empty():
+            return []
+        arr = np.array(pil_img.convert("RGB"))
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        # 少し緩める + 最小サイズを環境変数で可変に
+        gray = cv2.equalizeHist(gray)
+        min_px = int(os.getenv("FACE_MIN_SIZE_PX", "30"))
+        faces = face_cascade.detectMultiScale(
+            gray, scaleFactor=1.08, minNeighbors=5, minSize=(min_px, min_px)
+        )
+
+        # (x, y, w, h) -> (x1, y1, x2, y2)
+        return [(int(x), int(y), int(x + w), int(y + h)) for (x, y, w, h) in faces]
+    except Exception:
+        return []
+
+
+async def _ocr_text_with_timeout(pil_img: Image.Image, timeout_s: float) -> str:
+    """pytesseract をスレッドプールで実行し、timeoutで中断可能にする"""
+    if pytesseract is None:
+        return ""
+    lang = os.getenv("TESSERACT_LANG", "jpn+eng")
+
+    def _do_ocr():
+        # 軽め設定（重いとハングしやすい）
+        return pytesseract.image_to_string(pil_img, lang=lang)
+
+    try:
+        return await asyncio.wait_for(run_in_threadpool(_do_ocr), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        logger.warning("[fast] OCR timed out (%.1fs)", timeout_s)
+        return ""
+    except Exception as e:
+        logger.warning("[fast] OCR failed: %s", e)
+        return ""
+
+
+def _regex_count(text: str, policies: Set[str]) -> Dict[str, int]:
+    """既存 detectors の正規表現で件数を数える（email/phone/address/id）"""
+    out = {"email": 0, "phone": 0, "address": 0, "id": 0}
+    if not text:
+        return out
+    # 既存の正規表現マッチャーを使う前提
+    hits = detectors.classify_by_regex(text)
+    for h in hits:
+        k = h.get("type")
+        if k in out and k in policies:
+            out[k] += 1
+    return out
+
+
+@app.post("/detect/summary_fast")
+async def detect_summary_fast(
+    file: UploadFile = File(...),
+    policy: str = Form("email,phone,address,id,face"),
+    ocr_timeout_s: float = Form(4.0),
+):
+    """
+    軽量版の検出サマリ。
+    - 顔: OpenCV Haar
+    - テキスト: pytesseractをスレッド実行 + タイムアウト
+    """
+    try:
+        raw = await file.read()
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+    except Exception:
+        return JSONResponse({"error": "invalid image"}, status_code=400)
+
+    policies = set(p.strip() for p in policy.split(",") if p.strip())
+    counts = {"email": 0, "phone": 0, "address": 0, "id": 0, "face": 0}
+
+    # 顔
+    if "face" in policies:
+        faces = _detect_faces_cv2_simple(img)
+        counts["face"] = len(faces)
+
+    # テキスト
+    if policies.intersection({"email", "phone", "address", "id"}):
+        text = await _ocr_text_with_timeout(img, timeout_s=float(ocr_timeout_s))
+        tcounts = _regex_count(text, policies)
+        counts.update({k: counts[k] + tcounts.get(k, 0) for k in counts.keys()})
+
+    return JSONResponse({"counts": counts, "pii_found": any(v > 0 for v in counts.values())})
+
+
+@app.post("/redact/replace_fast")
+async def replace_fast_face_only(
+    file: UploadFile = File(...),
+    method: str = Form("pixelate"),  # pixelate | blur(box描画は非対応)
+):
+    """
+    顔だけを即時ピクセレートする軽量版（OCRなし）。
+    """
+    try:
+        raw = await file.read()
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+    except Exception:
+        return JSONResponse({"error": "invalid image"}, status_code=400)
+
+    faces = _detect_faces_cv2_simple(img)
+    if method not in ("pixelate",):
+        method = "pixelate"
+
+    for (x1, y1, x2, y2) in faces:
+        _pixelate_region(img, (x1, y1, x2, y2), factor=16)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/png", headers={"X-Faces-Detected": str(len(faces))})

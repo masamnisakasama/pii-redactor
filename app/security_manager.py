@@ -11,6 +11,7 @@ import pytesseract
 from PIL import Image
 import numpy as np
 import cv2
+import os
 
 # 機能としては将来の拡張性重視で残すが、真ん中の２つはとりまMAXIMUMかENHANCEDに変換する方針で
 class SecurityLevel(Enum):
@@ -136,7 +137,7 @@ class MaximumSecurityProcessor(ProcessorInterface):
         results: List[Dict] = []
         for v in lines.values():
             b0, b1, b2, b3 = v["bbox"]
-            b = (int(b0/SCALE), int(b1/SCALE), int(b2/SCALE), int(b3/SCALE))
+            b = (int(b0 / SCALE), int(b1 / SCALE), int(b2 / SCALE), int(b3 / SCALE))
             results.append({
                 "text": v["text"],
                 "bbox": b,
@@ -144,6 +145,32 @@ class MaximumSecurityProcessor(ProcessorInterface):
                 "method": "offline_tesseract_line",
                 "security_level": "maximum",
             })
+        
+        # ---- フォールバック：行OCRが空 or 全テキスト空なら1行で返す ----
+        if (not results) or (not any((it.get("text") or "").strip() for it in results)):
+            try:
+                lang = os.getenv("TESSERACT_LANG", "jpn+eng")
+                # まずは前処理画像で汎用ページ分割（psm 6）
+                text = (pytesseract.image_to_string(
+                    pil_pre, lang=lang, config="--oem 3 --psm 6"
+                ) or "").strip()
+                if not text:
+                    # ダメなら元画像でさらに緩め（psm 3）
+                    text = (pytesseract.image_to_string(
+                        pil, lang=lang, config="--oem 3 --psm 3"
+                    ) or "").strip()
+                if text:
+                    w, h = pil.size
+                    results = [{
+                        "text": text,
+                        "bbox": (0, 0, w, h),
+                        "confidence": 0.60,
+                        "method": "ocr_fallback",
+                        "security_level": "maximum",
+                    }]
+                    self.security_logger.info("maximum: ocr_fallback used (len=%d)", len(text))
+            except Exception as e:
+                self.security_logger.warning("maximum: ocr_fallback failed: %s", e)
         return results
             
     
