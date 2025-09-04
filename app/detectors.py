@@ -127,3 +127,66 @@ def detect_text_regions_east(image_bgr):
     except Exception as e:
         print(f"EAST disabled: {e}")
         return []
+
+# --- add: simple face detection (YuNet optional -> Haar fallback) ---
+try:
+    import cv2
+    import numpy as np
+except Exception:  # OpenCV未導入でも全体が死なないように
+    cv2 = None
+    np = None
+
+def detect_faces_cv2(pil_img):
+    """
+    返り値: [(x1, y1, x2, y2), ...]
+    環境変数:
+      USE_YUNET=true/false, YUNET_ONNX=/path/to/face_detection_yunet_2023mar.onnx
+      FACE_MIN_SIZE_PX=40  (小さい顔を拾いたいときに下げる)
+    """
+    if cv2 is None or np is None:
+        return []
+
+    arr = np.array(pil_img.convert("RGB"))
+    h, w = arr.shape[:2]
+    boxes = []
+
+    # 1) YuNet (あれば使う)
+    try:
+        use_yunet = os.getenv("USE_YUNET", "false").lower() in ("1","true","yes")
+        yunet_path = os.getenv("YUNET_ONNX", "")
+        if use_yunet and yunet_path and os.path.exists(yunet_path) and hasattr(cv2, "FaceDetectorYN_create"):
+            bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+            det = cv2.FaceDetectorYN_create(yunet_path, "", (w, h), score_threshold=0.6, nms_threshold=0.3, top_k=5000)
+            dets, _ = det.detect(bgr)
+            if dets is not None:
+                for d in dets:
+                    x, y, ww, hh = d[:4]
+                    x1, y1 = max(int(x), 0), max(int(y), 0)
+                    x2, y2 = min(int(x + ww), w), min(int(y + hh), h)
+                    if x2 > x1 and y2 > y1:
+                        boxes.append((x1, y1, x2, y2))
+    except Exception:
+        pass
+
+    # 2) Haar fallback
+    try:
+        cascade_path = getattr(cv2.data, "haarcascades", "") + "haarcascade_frontalface_default.xml"
+        face_cascade = cv2.CascadeClassifier(cascade_path)
+        if not face_cascade.empty():
+            gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+            gray = cv2.equalizeHist(gray)
+            min_sz = int(os.getenv("FACE_MIN_SIZE_PX", "40"))
+            faces = face_cascade.detectMultiScale(
+                gray, scaleFactor=1.08, minNeighbors=5, minSize=(min_sz, min_sz)
+            )
+            for (x, y, ww, hh) in faces:
+                boxes.append((int(x), int(y), int(x + ww), int(y + hh)))
+    except Exception:
+        pass
+
+    # 3) 重複ざっくり除去
+    uniq = []
+    for b in boxes:
+        if b not in uniq:
+            uniq.append(b)
+    return uniq

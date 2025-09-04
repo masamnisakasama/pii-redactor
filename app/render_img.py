@@ -57,8 +57,10 @@ def draw_replace(img, bbox, new_text, mode="readable", pad: Optional[int]=None, 
     except Exception:
         font = ImageFont.load_default()
 
-    text = str(new_text)
+     # textlength は複数行を測れずエラーになったため、改行はスペースに正規化
+    text = str(new_text).replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
     # 幅フィットのバイナリサーチ的縮小（最大20回）
+
     for _ in range(20):
         w = draw.textlength(text, font=font)
         if w <= (x2 - x1) - 6:
@@ -76,6 +78,7 @@ def draw_replace(img, bbox, new_text, mode="readable", pad: Optional[int]=None, 
     draw.text((x1 + 3, ty), text, fill=(0, 0, 0), font=font)
 
 # Optionalが必要な場所2
+# 狭すぎ/薄すぎ/測長不可は行bboxにFB
 def subbbox_from_match(line_text: str, match_text: str, line_bbox, font_path=None, pad: Optional[int]=None):
     """
     行テキスト中の match_text の描画位置を line_bbox 比で推定。
@@ -89,9 +92,14 @@ def subbbox_from_match(line_text: str, match_text: str, line_bbox, font_path=Non
     except Exception:
         font = ImageFont.load_default()
 
-    # 正規化（前後スペース詰め）
-    lt = (line_text or "").strip()
-    mt = (match_text or "").strip()
+    
+    # 正規化：改行→スペース、さらに空白連結を1つに圧縮（textlength対策）
+    lt = " ".join(((line_text or "")
+                   .replace("\r\n", " ").replace("\n", " ").replace("\r", " ")).split())
+    mt = " ".join(((match_text or "")
+                   .replace("\r\n", " ").replace("\n", " ").replace("\r", " ")).split())
+ 
+
 
     start = lt.find(mt)
     if start < 0:
