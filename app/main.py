@@ -11,14 +11,18 @@ origins = []
 if getattr(settings, "frontend_origins", None):
     origins = [o.strip() for o in settings.frontend_origins.split(",") if o.strip()]
 if origins:
-    app.add_middleware(CORSMiddleware,
-        allow_origins=origins, allow_credentials=True,
-        allow_methods=["*"], allow_headers=["*"])
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # 旧アプリを /legacy にマウント
 app.mount("/legacy", legacy_app)
 
-# 親起動時にレガシー側の startup も起動
+# 親起動時にレガシー側の startup も実行
 @app.on_event("startup")
 async def _startup():
     try:
@@ -33,7 +37,8 @@ async def _shutdown():
     except Exception:
         pass
 
-# ---- ここで新ルーターを明示的に登録（tryで握りつぶさない）----
-from app.api import health, security
-app.include_router(health.router)                          # /health, /capabilities
-app.include_router(security.router, prefix="/security")    # /security/*
+# 新ルーター（ここが重要：/redact を含める）
+from app.api import health, security, redact
+app.include_router(health.router)                           # /health, /capabilities
+app.include_router(security.router, prefix="/security")     # /security/*
+app.include_router(redact.router,   prefix="/redact")       # /redact/*
