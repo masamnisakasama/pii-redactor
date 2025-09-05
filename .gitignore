@@ -65,3 +65,8 @@ models/
 out*.png
 __pycache__/
 *.pyc
+
+# Never commit secrets
+.env*
+*.key
+

@@ -819,18 +819,32 @@ def _detect_faces_cv2_simple(pil_img: Image.Image) -> list[tuple[int, int, int, 
         return []
     try:
         # 既定のHaar分類器パス
-        cascade_path = getattr(cv2.data, "haarcascades", "") + "haarcascade_frontalface_default.xml"
+        cascade_path = os.getenv("HAAR_XML") or (getattr(cv2.data, "haarcascades", "") + "haarcascade_frontalface_default.xml")
         face_cascade = cv2.CascadeClassifier(cascade_path)
         if face_cascade.empty():
             return []
         arr = np.array(pil_img.convert("RGB"))
         gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        
         # 少し緩める + 最小サイズを環境変数で可変に
         gray = cv2.equalizeHist(gray)
-        min_px = int(os.getenv("FACE_MIN_SIZE_PX", "30"))
-        faces = face_cascade.detectMultiScale(
-            gray, scaleFactor=1.08, minNeighbors=5, minSize=(min_px, min_px)
-        )
+        # ---- 調整用ENV ----
+        min_px        = int(os.getenv("FACE_MIN_SIZE_PX", "30"))
+        scale_factor  = float(os.getenv("FACE_CASCADE_SCALE_FACTOR", "1.08"))
+        min_neighbors = int(os.getenv("FACE_CASCADE_MIN_NEIGHBORS", "5"))
+        auto_min_side = int(os.getenv("FACE_DET_AUTO_MIN_SIDE", "0"))  # 例: 480
+        # 小さい画像はスケールアップして検出精度を底上げ
+        if auto_min_side and min(arr.shape[1], arr.shape[0]) < auto_min_side:
+            ratio = auto_min_side / float(min(arr.shape[1], arr.shape[0]))
+            arr2  = cv2.resize(arr, (int(arr.shape[1]*ratio), int(arr.shape[0]*ratio)), interpolation=cv2.INTER_CUBIC)
+            gray2 = cv2.cvtColor(arr2, cv2.COLOR_RGB2GRAY)
+            gray2 = cv2.equalizeHist(gray2)
+            faces = face_cascade.detectMultiScale(gray2, scaleFactor=scale_factor, minNeighbors=min_neighbors, minSize=(min_px, min_px))
+            # 座標を原寸に戻す
+            faces = [(int(x/ratio), int(y/ratio), int(w/ratio), int(h/ratio)) for (x,y,w,h) in faces]
+        else:
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=scale_factor, minNeighbors=min_neighbors, minSize=(min_px, min_px))
+ 
 
         # (x, y, w, h) -> (x1, y1, x2, y2)
         return [(int(x), int(y), int(x + w), int(y + h)) for (x, y, w, h) in faces]
