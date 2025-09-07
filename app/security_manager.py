@@ -13,6 +13,8 @@ import numpy as np
 import cv2
 import os
 
+
+
 # 機能としては将来の拡張性重視で残すが、真ん中の２つはとりまMAXIMUMかENHANCEDに変換する方針で
 class SecurityLevel(Enum):
     """セキュリティレベルの定義"""
@@ -100,12 +102,12 @@ class MaximumSecurityProcessor(ProcessorInterface):
         )
         pil_pre = Image.fromarray(g)
 
-        # OCR（単一行に強い psm=7）
+        # OCR（単一行に強い psm=6）
         data = pytesseract.image_to_data(
             pil_pre,
             lang="jpn+eng",
             output_type=pytesseract.Output.DICT,
-            config="--oem 3 --psm 7",
+            config="--oem 3 --psm 6",
         )
 
         # 単語→行に集約
