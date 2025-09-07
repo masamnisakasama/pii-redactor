@@ -1,3 +1,7 @@
+try:
+    from app.adapters import normalizers
+except Exception:
+    normalizers = None  # type: ignore
 # app/main.py
 # セキュリティトグル機能統合版メインAPI　フロントと組み合わせて使う　今の所バグありなのでまずはシンプル版でcurl通す
 # 現状最もマシな出力：style=readable + replace_scope=token + font_path=PC内にあるフォント
@@ -23,6 +27,13 @@ from .text_detect import detect_text_boxes_east # 文字検知の後、redactも
 from .pipeline_modes import resolve_face_mode, enforce_face_consent
 
 # ---------------------------------------------------
+
+def _norm_text_for_pii(s: str) -> str:
+    try:
+        return normalizers.normalize_for_pii(s) if normalizers else s
+    except Exception:
+        return s
+
 # アプリ/設定
 # ---------------------------------------------------
 logging.basicConfig(level=logging.INFO)
@@ -238,7 +249,7 @@ async def preview_with_security_toggle(
                         if not (line_text.strip() and line_bbox):
                             continue
 
-                        regex_hits = detectors.classify_by_regex(line_text)
+                        regex_hits = detectors.classify_by_regex(_norm_text_for_pii(line_text))
                         if security_manager.current_level != SecurityLevel.MAXIMUM:
                             proc = security_manager.get_current_processor()
                             ai_ner = await proc.ner_process([line_text])
@@ -330,6 +341,9 @@ async def preview_with_security_toggle(
 # consistency_key：同一キーデータの別名一貫性維持用。
 # security_level：一時的なレベル上書き。
 # ---------------------------------------------------
+
+
+
 @app.post("/redact/replace")
 async def replace_with_security_toggle(
     policy: str = Form("email,name,phone,id,amount,address"),
@@ -397,7 +411,7 @@ async def replace_with_security_toggle(
                     if not line_text or not line_bbox:
                         continue
 
-                    regex_hits = [h for h in detectors.classify_by_regex(line_text) if h.get("type") in policies]
+                    regex_hits = [h for h in detectors.classify_by_regex(_norm_text_for_pii(line_text)) if h.get("type") in policies]
                     if not regex_hits:
                         continue
 
@@ -456,7 +470,7 @@ async def replace_with_security_toggle(
             if not line_text or not line_bbox:
                 continue
 
-            regex_hits = [h for h in detectors.classify_by_regex(line_text) if h.get("type") in policies]
+            regex_hits = [h for h in detectors.classify_by_regex(_norm_text_for_pii(line_text)) if h.get("type") in policies]
             if not regex_hits:
                 continue
 
@@ -726,12 +740,6 @@ async def detect_summary(
 
 @app.get("/capabilities")
 async def get_capabilities():
-    # delegate to extracted core (no behavior change)
-    return await redact_replace_core(
-        policy, style, consistency_key, security_level,
-        file, image_url, font_path, replace_scope, face_mode, consent_faces
-    )
-
     if not security_manager:
         raise HTTPException(status_code=500, detail="Security manager not initialized")
 
@@ -951,220 +959,3 @@ async def replace_fast_face_only(
     img.save(buf, format="PNG")
     buf.seek(0)
     return StreamingResponse(buf, media_type="image/png", headers={"X-Faces-Detected": str(len(faces))})
-
-# ====== Extracted core for /redact/replace (do not change behavior) ======
-async def redact_replace_core(
-    request,
-    policy,
-    style,
-    consistency_key,
-    security_level,
-    file,
-    image_url,
-    font_path,
-    replace_scope,          # "token" or "line"
-    face_mode,
-    consent_faces,          # 'granted'|'unknown'|'denied'
-):
-    """
-    Core implementation extracted from /redact/replace.
-    Keep behavior identical to original handler.
-    """
-    if not security_manager:
-        raise HTTPException(status_code=500, detail="Security manager not initialized")
-    if not file and not image_url:
-        return JSONResponse({"error": "no input"}, status_code=400)
-
-    # --- metrics (可視化用) ---
-    replaced_tokens = 0
-    replaced_lines = 0
-    t0 = time.time()
-
-    allowed_styles = {"readable", "box", "pixelate", "blur"}
-    if style not in allowed_styles:
-        style = "readable"
-    if replace_scope not in {"token", "line"}:
-        replace_scope = "token"
-
-    # 一時レベル
-    original_level = security_manager.current_level
-    if security_level:
-        try:
-            security_manager.set_security_level(SecurityLevel(security_level))
-        except ValueError:
-            available = [l.value for l in security_manager.get_available_levels()]
-            raise HTTPException(status_code=400, detail=f"Invalid security level. Available: {available}")
-
-    try:
-        blob = await _load_file_bytes(file, image_url)
-        policies = set(p.strip() for p in policy.split(",") if p.strip())
-        is_pdf = (file and file.filename.lower().endswith(".pdf")) or (image_url and image_url.lower().endswith(".pdf"))
-
-        # =========================
-        # PDF（ラスタ処理→再合成）
-        # =========================
-        if is_pdf:
-            pages = render_pdf.pdf_to_images(blob, dpi=settings.pdf_dpi)
-            hits_by_page: Dict[int, List[Dict]] = {}
-            seen_lines_per_page: Dict[int, List[Tuple[int, int, int, int]]] = {}
-            IOU_TH = 0.6  # 行の重複検出しきい値
-
-            for page_idx, pimg in enumerate(pages):
-                ai_results = await security_manager.process_document(pimg, policies)
-
-                for ocr_result in ai_results.get("ocr_results", []):
-                    line_text = ocr_result.get("text", "")
-                    line_bbox = ocr_result.get("bbox")
-                    if not line_text or not line_bbox:
-                        continue
-
-                    regex_hits = [h for h in detectors.classify_by_regex(line_text) if h.get("type") in policies]
-                    if not regex_hits:
-                        continue
-
-                    if replace_scope == "line":
-                        lb = tuple(map(int, line_bbox))
-                        # 既に近い行を描いていればスキップ（ゴースト防止）
-                        prev = seen_lines_per_page.get(page_idx, [])
-                        if any(_iou(lb, b) > IOU_TH for b in prev):
-                            continue
-                        seen_lines_per_page.setdefault(page_idx, []).append(lb)
-
-                        new_line = _inline_replace_line(line_text, policies, consistency_key)
-                        hits_by_page.setdefault(page_idx, []).append({"bbox": lb, "new": new_line})
-                        replaced_lines += 1
-
-                    else:
-                        # token: 部分 bbox を推定して個別に描画
-                        for h in regex_hits:
-                            alias_txt = _generate_alias(h["type"], h["text"], consistency_key)
-                            sub_bbox = render_img.subbbox_from_match(
-                                line_text=line_text, match_text=h["text"], line_bbox=line_bbox, font_path=font_path
-                            )
-                            hits_by_page.setdefault(page_idx, []).append({"bbox": sub_bbox, "new": alias_txt})
-                            replaced_tokens += 1
-
-            # PDFでも顔処理をしたい場合、ここで pimg ごとに顔検出→bbox を hits に足す設計にする
-            # X-Replaced-Tokens,X-Replaced-Linesはそれぞれトークン置換した件数と行置換した件数
-            pdf_bytes = render_pdf.process_pdf_raster(blob, hits_by_page, style=style)
-            elapsed_ms = int((time.time() - t0) * 1000)
-            return StreamingResponse(
-                io.BytesIO(pdf_bytes),
-                media_type="application/pdf",
-                headers={
-                    "X-Security-Level": security_manager.current_level.value,
-                    "X-Replaced-Tokens": str(replaced_tokens),
-                    "X-Replaced-Lines": str(replaced_lines),
-                    "X-Elapsed-ms": str(elapsed_ms),
-                },
-            )
-
-        # =========================
-        # 画像（直接描画）
-        # =========================
-        img = Image.open(io.BytesIO(blob)).convert("RGB")
-        if max(img.size) > settings.max_image_size:
-            img.thumbnail((settings.max_image_size, settings.max_image_size), Image.Resampling.LANCZOS)
-
-        ai_results = await security_manager.process_document(img, policies)
-        seen_line_boxes_img: List[Tuple[int, int, int, int]] = []
-        IOU_TH_IMG = 0.6
-
-        # --- 文字：token/line 置換の描画 ---
-        for ocr_result in ai_results.get("ocr_results", []):
-            line_text = ocr_result.get("text", "")
-            line_bbox = ocr_result.get("bbox")
-            if not line_text or not line_bbox:
-                continue
-
-            regex_hits = [h for h in detectors.classify_by_regex(line_text) if h.get("type") in policies]
-            if not regex_hits:
-                continue
-
-            if replace_scope == "line":
-                lb = tuple(map(int, line_bbox))
-                if any(_iou(lb, b) > IOU_TH_IMG for b in seen_line_boxes_img):
-                    continue
-                seen_line_boxes_img.append(lb)
-
-                new_line = _inline_replace_line(line_text, policies, consistency_key)
-                render_img.draw_replace(img, lb, new_line, mode=style, font_path=font_path)
-                replaced_lines += 1
-
-            else:
-                for h in regex_hits:
-                    alias_txt = _generate_alias(h["type"], h["text"], consistency_key)
-                    sub_bbox = render_img.subbbox_from_match(
-                        line_text=line_text, match_text=h["text"], line_bbox=line_bbox, font_path=font_path
-                    )
-                    render_img.draw_replace(img, sub_bbox, alias_txt, mode=style, font_path=font_path)
-                    replaced_tokens += 1
-
-        # --- 顔：PII_IMAGES_MODE/face_mode/consent を反映して処理 ---
-        _face_method = resolve_face_mode(face_mode)                        # env or form → method名にマップ
-        _face_method = enforce_face_consent(_face_method, consent_faces)   # 同意ないswapはsmart_blurへ
-
-        if "face" in policies:
-            # セキュリティレベルに応じて Nanobanana など外部APIをオン
-            use_advanced = security_manager.current_level == SecurityLevel.ENHANCED
-            nb_key = getattr(settings, "nanobanan_api_key", None) if use_advanced else None
-            nb_ep  = getattr(settings, "nanobanan_endpoint", None) if use_advanced else None
-
-            # いまの img を一旦 PNG バイト化 → 顔処理 → PIL に戻す
-            _buf = io.BytesIO()
-            img.save(_buf, format="PNG")
-            _in_bytes = _buf.getvalue()
-
-            out_bytes = await redact_faces_image_bytes_enhanced(
-                _in_bytes,
-                method=_face_method,          # blur / pixelate / pixelate_strict / smart_blur / replace_face / keep
-                strength=16,                  # 必要に応じて ENV 化
-                expand=0.12,
-                out_format="PNG",
-                use_multiple_detectors=use_advanced,   # ENHANCED では多段検出
-                nanobanan_api_key=nb_key,              # ENHANCED かつキーがあれば API 利用
-                nanobanan_endpoint=nb_ep,
-                persona=None,                           # 将来の差し替え人格指定
-            )
-            img = Image.open(io.BytesIO(out_bytes)).convert("RGB")
-
-        # === EAST text redaction (optional; OFF by default) =================
-        if settings.use_east_text:
-            try:
-                import numpy as np, cv2, os
-                bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-                boxes = detect_text_boxes_east(
-                    bgr,
-                    model_path=(settings.east_pb or os.getenv("EAST_PB") or "models/text/frozen_east_text_detection.pb"),
-                    conf_thr=settings.east_conf_threshold,
-                    nms_thr=settings.east_nms_threshold,
-                    max_side=settings.east_max_side,
-                    min_size=settings.east_min_size,
-                )
-                # ここでは安全側に倒して、検出テキスト領域を角丸ボックスで塗る
-                for (x, y, w, h) in boxes:
-                    render_img.draw_replace(img, (x, y, x + w, y + h), "█", mode="box", font_path=None)
-                logger.info(f"[east] masked text boxes: {len(boxes)}")
-            except Exception as e:
-                logger.warning(f"EAST text redaction skipped: {e}")
-
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        buf.seek(0)
-
-        elapsed_ms = int((time.time() - t0) * 1000)
-        return StreamingResponse(
-            buf,
-            media_type="image/png",
-            headers={
-                "X-Security-Level": security_manager.current_level.value,
-                "X-Replaced-Tokens": str(replaced_tokens),
-                "X-Replaced-Lines": str(replaced_lines),
-                "X-Elapsed-ms": str(elapsed_ms),
-            },
-        )
-
-    finally:
-        if security_level and original_level != security_manager.current_level:
-            security_manager.set_security_level(original_level)
-# ====== /Extracted core ======

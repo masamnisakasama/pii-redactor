@@ -2,6 +2,7 @@
 import re
 from typing import List, Dict
 import cv2
+from networkx import hits
 import numpy as np
 import os
 from functools import lru_cache
@@ -31,6 +32,19 @@ def classify_by_regex(text: str) -> List[Dict]:
     for m in RE_PHONE.finditer(text):  out.append({"type":"phone","text":m.group(),"conf":0.95,"reason":"regex:phone"})
     for m in RE_AMOUNT.finditer(text): out.append({"type":"amount","text":m.group(),"conf":0.90,"reason":"regex:amount"})
     for m in RE_ID.finditer(text):     out.append({"type":"id","text":m.group(),"conf":0.88,"reason":"regex:id"})
+
+    try:
+        # -, ‐, – , — , − のいずれも許容
+        _DASH = r"[-\u2010\u2013\u2014\u2212]"
+        miter = re.finditer(rf"(?<!\d)(0\d{{1,4}}){_DASH}(\d{{2,4}}){_DASH}(\d{{3,4}})(?!\d)", text)
+        for m in miter:
+            ph = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+            hits.append({"type": "phone", "text": ph})
+    except Exception:
+        pass
+
+
+
     return out
 
 def merge_with_ner(regex_hits: List[Dict], ner_hits: List[Dict]) -> List[Dict]:

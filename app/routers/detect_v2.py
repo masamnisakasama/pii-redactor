@@ -33,6 +33,22 @@ except Exception:
 
 router = APIRouter()
 
+def _detect_faces_any(img):
+    if detectors is None:
+        return []
+    if hasattr(detectors, "detect_faces_cv2"):
+        try:
+            return _detect_faces_any(img)
+        except Exception:
+            pass
+    if hasattr(detectors, "detect_faces"):
+        try:
+            return detectors.detect_faces(img)
+        except Exception:
+            pass
+    return []
+
+
 
 def _get_security_manager(request: Request):
     """V2共通：app.state → app.main グローバル の順で取得"""
@@ -130,7 +146,7 @@ async def detect_summary_v2(
                         pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 解像度を上げて検出安定化
                         if Image:
                             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                            faces = detectors.detect_faces_cv2(img) if hasattr(detectors, "detect_faces_cv2") else []
+                            faces = _detect_faces_any(img) if hasattr(detectors, "detect_faces_cv2") else []
                             counts["face"] += len(faces)
                     except Exception:
                         pass
@@ -147,7 +163,7 @@ async def detect_summary_v2(
                             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                             t = await _ocr_with_processor_or_tesseract(sm, img, timeout_s=float(ocr_timeout_s))
                     if t and hasattr(detectors, "classify_by_regex"):
-                        for h in detectors.classify_by_regex(t):
+                        for h in detectors.classify_by_regex(normalizers.normalize_for_pii(t)):
                             k = h.get("type")
                             if k in counts and k in policies:
                                 counts[k] += 1
@@ -159,7 +175,7 @@ async def detect_summary_v2(
             # 画像
             img = Image.open(io.BytesIO(raw)).convert("RGB")
             if "face" in policies and hasattr(detectors, "detect_faces_cv2"):
-                faces = detectors.detect_faces_cv2(img)
+                faces = _detect_faces_any(img)
                 counts["face"] += len(faces)
             if policies.intersection({"email", "phone", "address", "id"}):
                 text = await _ocr_with_processor_or_tesseract(sm, img, timeout_s=float(ocr_timeout_s))
@@ -200,7 +216,7 @@ async def detect_summary_fast_v2(
 
     # 顔
     if "face" in policies and hasattr(detectors, "detect_faces_cv2"):
-        faces = detectors.detect_faces_cv2(img)
+        faces = _detect_faces_any(img)
         counts["face"] += len(faces)
 
     # テキスト

@@ -7,7 +7,7 @@ import io
 from typing import List, Tuple, Literal, Optional
 import numpy as np
 import cv2
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageOps
 import httpx
 import base64
 import os
@@ -503,6 +503,8 @@ async def redact_faces_image_bytes_enhanced(
 
     if not faces:
         out = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    if _scaled:
+        out = out.resize(_orig_size, Image.LANCZOS)
         bio = io.BytesIO()
         if out_format.upper() in ("JPEG", "JPG"):
             out.save(bio, format="JPEG", quality=jpeg_quality, optimize=True)
@@ -570,6 +572,8 @@ async def redact_faces_image_bytes_enhanced(
 
     # 出力
     out = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    if _scaled:
+        out = out.resize(_orig_size, Image.LANCZOS)
     bio = io.BytesIO()
     print(f"[enhanced_face_redactor] faces={len(faces)} method={method} detectors={'multi' if use_multiple_detectors else 'haar'}")
     if out_format.upper() in ("JPEG", "JPG"):
